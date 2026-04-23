@@ -1,0 +1,195 @@
+version: 1
+project_scope:
+  name: "실험실 공사 자동점검"
+  description: "실제 템플릿 기준 최소 규칙"
+  primary_project_id: "3713261754210573091"
+
+field_sources:
+  title:
+    source: post.subject
+  stage:
+    source: milestone.name
+  status:
+    source: workflow.name
+  tags:
+    source: tags[].name
+  body_text:
+    source: body.content
+  attachments:
+    source: files[]
+  attachment_names:
+    source: files[].name
+  comment_count:
+    source: logs.count
+
+parsing:
+  body_sections:
+    - key: construction_name
+      label_patterns: ["공사명"]
+      required_in_mvp: true
+    - key: k_drive
+      label_patterns: ["K-DRIVE"]
+      required_in_mvp: false
+    - key: approval_doc
+      label_patterns: ["시행품의"]
+      required_in_mvp: false
+    - key: account
+      label_patterns: ["사용계정"]
+      required_in_mvp: false
+    - key: work_building
+      label_patterns: ["1. 건축", "1.  건축"]
+      required_in_mvp: false
+    - key: work_mechanical
+      label_patterns: ["2. 설비"]
+      required_in_mvp: false
+    - key: work_electrical
+      label_patterns: ["3. 전기"]
+      required_in_mvp: false
+    - key: contract_date
+      label_patterns: ["계약일"]
+      required_in_mvp: false
+    - key: start_date
+      label_patterns: ["착공일"]
+      required_in_mvp: false
+    - key: completion_date
+      label_patterns: ["준공일"]
+      required_in_mvp: false
+    - key: notes
+      label_patterns: ["참고사항"]
+      required_in_mvp: false
+
+rule_defaults:
+  severity_order: ["info", "low", "medium", "high", "critical"]
+
+rules:
+  - id: required_trade_tag
+    enabled: true
+    severity: high
+    title: "공종 태그 누락"
+    when:
+      all:
+        - field: tags
+          op: not_contains_any
+          value:
+            - "공종: 건축"
+            - "공종: 기계"
+            - "공종: 기타"
+            - "공종: 석면"
+            - "공종: 소방"
+            - "공종: 전기"
+            - "공종: 조경"
+            - "공종: 토목"
+            - "공종: 통신"
+    action:
+      result: "보완 필요"
+      message: "공종(필수) 태그 1개 이상이 필요합니다."
+
+  - id: missing_construction_name
+    enabled: true
+    severity: high
+    title: "공사명 누락"
+    when:
+      all:
+        - field: parsed.construction_name
+          op: is_empty
+    action:
+      result: "보완 필요"
+      message: "본문에 공사명을 입력해야 합니다."
+
+  - id: missing_construction_content_all_empty
+    enabled: true
+    severity: high
+    title: "공사내용 누락"
+    when:
+      all:
+        - field: parsed.work_building
+          op: is_empty
+        - field: parsed.work_mechanical
+          op: is_empty
+        - field: parsed.work_electrical
+          op: is_empty
+    action:
+      result: "보완 필요"
+      message: "공사내용(건축/설비/전기) 중 최소 1개는 입력해야 합니다."
+
+  - id: no_attachment_at_all
+    enabled: true
+    severity: medium
+    title: "첨부파일 없음"
+    when:
+      all:
+        - field: attachments
+          op: count_eq
+          value: 0
+    action:
+      result: "보완 권고"
+      message: "관련 근거자료 또는 현장사진 첨부가 권장됩니다."
+
+  - id: approval_stage_without_approval_doc
+    enabled: true
+    severity: high
+    title: "시행품의 단계 자료 누락"
+    when:
+      all:
+        - field: stage
+          op: eq
+          value: "시행품의"
+        - field: parsed.approval_doc
+          op: is_empty
+    action:
+      result: "보완 필요"
+      message: "시행품의 단계에서는 시행품의 항목 입력이 필요합니다."
+
+  - id: contract_stage_without_contract_date
+    enabled: true
+    severity: high
+    title: "계약체결의뢰 단계 계약일 누락"
+    when:
+      all:
+        - field: stage
+          op: eq
+          value: "계약체결의뢰"
+        - field: parsed.contract_date
+          op: is_empty
+    action:
+      result: "보완 필요"
+      message: "계약체결의뢰 단계에서는 계약일 입력이 필요합니다."
+
+  - id: start_stage_without_start_date
+    enabled: true
+    severity: high
+    title: "착공 단계 착공일 누락"
+    when:
+      all:
+        - field: stage
+          op: eq
+          value: "착공"
+        - field: parsed.start_date
+          op: is_empty
+    action:
+      result: "보완 필요"
+      message: "착공 단계에서는 착공일 입력이 필요합니다."
+
+  - id: completion_stage_without_completion_date
+    enabled: true
+    severity: high
+    title: "준공 단계 준공일 누락"
+    when:
+      all:
+        - field: stage
+          op: eq
+          value: "준공"
+        - field: parsed.completion_date
+          op: is_empty
+    action:
+      result: "보완 필요"
+      message: "준공 단계에서는 준공일 입력이 필요합니다."
+
+readiness_score:
+  method: weighted_checklist
+  max_score: 100
+  weights:
+    trade_tag: 25
+    construction_name: 25
+    work_content: 30
+    attachment_present: 20
