@@ -9,7 +9,7 @@
        - 세부 사항 (최대 3개)
     [표] 필요 시 삽입
 """
-import sys, json, zipfile, html, re, os, subprocess
+import sys, json, zipfile, html, re, os, subprocess, shutil, glob
 from datetime import datetime
 
 TEMPLATE = os.path.join(os.path.dirname(__file__), "보고서 초안 양식.hwpx")
@@ -236,14 +236,105 @@ JSON만 응답 (설명 없이):
 }}"""
 
 
+def _normalize_phrase(text: str, default_suffix: str = "정리") -> str:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if not text:
+        return default_suffix
+    if any(text.endswith(s) for s in ["실시", "예정", "완료", "관리", "추진", "검토", "작성", "공유"]):
+        return cut(text)
+    return cut(f"{text} {default_suffix}")
+
+
+def _fallback_report(keywords: list[str]) -> dict:
+    raw = [k.strip() for k in keywords if str(k).strip()]
+    title = cut(raw[0] if raw else "보고서 초안")
+    body = raw[1] if len(raw) > 1 else ""
+    parts = [p.strip(" -•\n\t") for p in re.split(r"[\n,]+", body) if p.strip(" -•\n\t")]
+    if not parts:
+        parts = [title, "회의 목적", "참여자 및 역할"]
+
+    detail_pool = parts[1:] or ["세부사항 정리", "일정 검토"]
+    points = []
+    for idx, part in enumerate(parts[:3]):
+        details = []
+        if idx == 0 and body:
+            details.append(_normalize_phrase(body, "정리"))
+        for extra in detail_pool[idx:idx+2]:
+            norm = _normalize_phrase(extra, "정리")
+            if norm not in details:
+                details.append(norm)
+        points.append({
+            "summary": _normalize_phrase(part, "정리"),
+            "details": details[:3],
+            "table": None,
+        })
+
+    return {
+        "title": title,
+        "sections": [
+            {
+                "source": "시설운영팀",
+                "topic": cut(title),
+                "points": points[:3],
+                "table": None,
+            },
+            {
+                "source": "업무개요",
+                "topic": "추진 방향",
+                "points": [
+                    {
+                        "summary": "회의 목적 정리",
+                        "details": [
+                            _normalize_phrase(parts[0] if parts else title, "정리"),
+                            "검토사항 공유",
+                        ],
+                        "table": None,
+                    },
+                    {
+                        "summary": "참여자 역할 정리",
+                        "details": [
+                            _normalize_phrase(parts[1] if len(parts) > 1 else "참여자 역할", "정리"),
+                            "후속 일정 검토",
+                        ],
+                        "table": None,
+                    },
+                ],
+                "table": None,
+            },
+        ],
+    }
+
+
+def _resolve_claude_command() -> list[str] | None:
+    _which = shutil.which("claude")
+    if _which:
+        return [_which]
+
+    _candidates = [
+        "/mnt/c/Users/진광진광/AppData/Local/AnthropicClaude/claude.exe",
+        os.path.join(os.path.expanduser("~"), "AppData", "Local", "AnthropicClaude", "claude.exe"),
+    ]
+    _candidates.extend(glob.glob("/mnt/c/Users/*/AppData/Local/AnthropicClaude/claude.exe"))
+
+    for _cmd in _candidates:
+        if _cmd and os.path.exists(_cmd):
+            return [_cmd]
+    return None
+
+
 def generate_report(keywords: list[str]) -> dict:
     context = load_context()
     context_block = f"\n[부서 컨텍스트]\n{context}\n" if context else ""
     prompt = PROMPT_TMPL.format(keywords=", ".join(keywords), context_block=context_block)
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
+
+    _claude_cmd = _resolve_claude_command()
+    if not _claude_cmd:
+        return _fallback_report(keywords)
+
     result = subprocess.run(
-        ["claude", "-p", prompt],
+        _claude_cmd + ["-p", prompt],
         capture_output=True, text=True, encoding="utf-8", errors="replace", env=env
     )
     if result.returncode != 0:

@@ -4,7 +4,7 @@ AI 보고서 자동 생성기 - Streamlit 웹앱
 """
 import streamlit as st
 import streamlit.components.v1 as components
-import os, re, sys, tempfile, zipfile, hashlib
+import os, re, sys, tempfile, zipfile, hashlib, glob
 from io import BytesIO
 from datetime import datetime
 
@@ -587,6 +587,119 @@ def apply_fields_to_contract_tool(fields: dict):
         st.session_state["ct_price"] = int(fields["estimated_price"])
 
 
+def find_small_work_template() -> str | None:
+    _candidates = [
+        os.path.join(os.path.dirname(__file__), "templates", "승락서,지급각서,하자각서.xlsx"),
+        os.path.join(os.path.expanduser("~"), "Desktop", "소액공사 자료", "승락서,지급각서,하자각서.xlsx"),
+        "/mnt/c/Users/진광진광/Desktop/소액공사 자료/승락서,지급각서,하자각서.xlsx",
+    ]
+    _candidates.extend(glob.glob("/mnt/c/Users/*/Desktop/소액공사 자료/승락서,지급각서,하자각서.xlsx"))
+    for _path in _candidates:
+        if _path and os.path.exists(_path):
+            return _path
+    return None
+
+
+def _fmt_date_ymd(_dt) -> str:
+    return _dt.strftime("%Y-%m-%d")
+
+
+def _fmt_period_text(_start, _end) -> str:
+    return f"{_fmt_date_ymd(_start)} {_fmt_date_ymd(_end)}"
+
+
+def _fmt_korean_date_text(_dt) -> str:
+    return f"{_dt.year}   년  {_dt.month}월    {_dt.day}일"
+
+
+def build_small_work_doc_xlsx(data: dict) -> tuple[bytes, str]:
+    _template_path = find_small_work_template()
+    if not _template_path:
+        raise FileNotFoundError("소액공사 양식 파일을 찾지 못했습니다. Desktop/소액공사 자료 폴더를 확인하세요.")
+
+    import openpyxl
+    from openpyxl.drawing.image import Image as XLImage
+    from PIL import Image as PILImage
+
+    _wb = openpyxl.load_workbook(_template_path)
+    _ws_in = _wb["★자료입력"]
+    _ws_accept = _wb["승락서"]
+    _ws_pay = _wb["지급각서(7.5%)"]
+    _ws_defect = _wb["하자각서(3%)"]
+
+    _contract_date = data["contract_date"]
+    _start_date = data["start_date"]
+    _end_date = data["end_date"]
+    _defect_rate = float(data.get("defect_rate", 0.03) or 0.03)
+    _defect_label = data.get("defect_label", "건설업종 3%")
+    _defect_period = (data.get("defect_period") or "2년").strip()
+    _seal_image_bytes = data.get("seal_image_bytes")
+
+    _ws_in["G2"] = data.get("contract_no", "")
+    _ws_in["H2"] = _fmt_date_ymd(_contract_date)
+    _ws_in["I2"] = _fmt_period_text(_start_date, _end_date)
+    _ws_in["J2"] = data.get("project_name", "")
+    _ws_in["K2"] = int(data.get("base_amount", 0) or 0)
+    _ws_in["L2"] = int(data.get("contract_amount", 0) or 0)
+    _ws_in["M2"] = data.get("contract_method", "수의계약")
+    _ws_in["N2"] = data.get("company_name", "")
+    _ws_in["O2"] = data.get("biz_no", "")
+    _ws_in["P2"] = data.get("ceo_name", "")
+    _ws_in["Q2"] = data.get("address", "")
+
+    _ws_pay["C7"] = "=승락서!B7"
+    _ws_pay["G7"] = "=승락서!C8"
+    _ws_defect["A18"] = _fmt_korean_date_text(_contract_date)
+    _ws_defect["B7"] = _defect_period
+    _ws_defect["I6"] = f"=I5*{_defect_rate}"
+    _ws_defect["B6"] = '=\"일금\"&TEXT(I6,\"[DBNUM4]G/표준\")&\"원정\"'
+
+    for _cell in ["L14", "L15", "L16"]:
+        _ws_defect[_cell] = ""
+    _mark_map = {
+        "건설업종 3%": "L14",
+        "조경 5%": "L15",
+        "전기, 통신, 소방 등 건설업종 외의 공사 2%": "L16",
+    }
+    if _defect_label in _mark_map:
+        _ws_defect[_mark_map[_defect_label]] = "☑"
+
+    if _seal_image_bytes:
+        _png_bytes = BytesIO()
+        with PILImage.open(BytesIO(_seal_image_bytes)) as _img:
+            _img = _img.convert("RGBA").resize((52, 60))
+            _img.save(_png_bytes, format="PNG")
+        _png_bytes.seek(0)
+
+        _ws_accept._images = []
+        _ws_pay._images = []
+        _ws_defect._images = []
+
+        _img1 = XLImage(BytesIO(_png_bytes.getvalue()))
+        _ws_accept.add_image(_img1, "D30")
+
+        _img2 = XLImage(BytesIO(_png_bytes.getvalue()))
+        _ws_pay.add_image(_img2, "C29")
+
+        _img3 = XLImage(BytesIO(_png_bytes.getvalue()))
+        _ws_defect.add_image(_img3, "B25")
+
+    try:
+        _wb.calculation.calcMode = "auto"
+        _wb.calculation.fullCalcOnLoad = True
+        _wb.calculation.forceFullCalc = True
+    except Exception:
+        pass
+
+    _buf = BytesIO()
+    _wb.save(_buf)
+    _buf.seek(0)
+
+    _safe_name = re.sub(r'[\\/:*?"<>|]+', '_', data.get("project_name", "소액공사"))[:80]
+    _file_name = f"소액공사서류_{_safe_name}_{_contract_date.strftime('%Y%m%d')}.xlsx"
+    return _buf.getvalue(), _file_name
+
+
 def analyze_design_document(file_name: str, text: str, sheet_names: list[str]):
     normalized = _normalize_text(text)
     haystack = f"{file_name} {' '.join(sheet_names)} {normalized}".lower()
@@ -687,26 +800,35 @@ with _main_col:
 
     # ── Tab 1: 보고서 생성 ────────────────────────────────────
     with tab1:
-        st.subheader("키워드 입력")
+        st.subheader("초안 입력")
 
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            keywords_input = st.text_input(
-                label="키워드",
-                placeholder='예: "2026년 춘계 체육대회 계획(안)" 노원구 대학로',
-                label_visibility="collapsed",
-            )
-        with col2:
+        _draft_title = st.text_input(
+            "제목",
+            placeholder="예: 시설운영팀 에너지절감 아이디어 회의",
+            key="draft_title_input",
+        )
+
+        _draft_body = st.text_area(
+            "주요내용",
+            placeholder="여기에 내용을 입력해주세요",
+            height=140,
+            key="draft_body_input",
+        )
+
+        _gen_col1, _gen_col2 = st.columns([4, 1])
+        with _gen_col2:
             generate_btn = st.button("🚀 생성", type="primary", use_container_width=True)
 
-        st.caption("띄어쓰기로 키워드를 구분합니다. 공백이 포함된 키워드는 따옴표로 묶어주세요.")
+        st.markdown('예시 내용: "시설운영팀 에너지절감 아이디어 회의"')
+        st.markdown("→ 회의 또는 업무 목적을 한두 문장으로 간단히 작성해주세요.")
+        st.markdown("→ 참여자 및 역할은 자유 형식으로 입력해주세요.<br>&nbsp;&nbsp;&nbsp;&nbsp;(예: 보고서 김진광, 기획 서진영·안일진, 설비 고석일 주임 등)", unsafe_allow_html=True)
 
-        if generate_btn and keywords_input.strip():
-            import shlex
-            try:
-                kw = shlex.split(keywords_input)
-            except ValueError:
-                kw = keywords_input.split()
+        if generate_btn and (_draft_title.strip() or _draft_body.strip()):
+            _draft_keywords = []
+            if _draft_title.strip():
+                _draft_keywords.append(_draft_title.strip())
+            if _draft_body.strip():
+                _draft_keywords.append(_draft_body.strip())
 
             st.session_state.report_result = None
             st.session_state.report_error = None
@@ -716,7 +838,7 @@ with _main_col:
 
             with st.spinner(""):
                 try:
-                    st.session_state.report_result = generate_report(kw)
+                    st.session_state.report_result = generate_report(_draft_keywords)
                 except Exception as e:
                     st.session_state.report_error = str(e)
             st.rerun()
@@ -940,7 +1062,7 @@ with _main_col:
 
     # ── Tab 3: 업무 도구 ─────────────────────────────────────
     with tab3:
-        _ut1, _ut2 = st.tabs(["🧮 조달청 제비율 계산기", "📋 계약 방식 판단"])
+        _ut1, _ut2, _ut3 = st.tabs(["🧮 조달청 제비율 계산기", "📋 계약 방식 판단", "🗂️ 소액공사 서류 생성기"])
 
         # ══ 2026.04.13 조달청 건축∙산업환경설비공사 원가계산 간접공사비 적용기준 ══
         # 간접노무비율(직노×%) / 기타경비율((재+노)×%) — (규모키, 기간키): (건축, 산업설비)
@@ -1679,6 +1801,135 @@ with _main_col:
 
 > 위 금액은 **추정가격(부가세 제외)** 기준이며, **분할 발주는 합산 적용**됩니다.
                 """)
+
+        # ── 소액공사 서류 생성기 ───────────────────────────────
+        with _ut3:
+            _template_path = find_small_work_template()
+            if _template_path:
+                st.caption(f"📄 양식 파일 연결됨: {_template_path}")
+            else:
+                st.warning("양식 파일을 찾지 못했습니다. Desktop/소액공사 자료/승락서,지급각서,하자각서.xlsx 위치를 확인하세요.")
+
+            st.caption("승락서 · 지급각서 · 하자보수책임각서를 하나의 Excel 파일로 생성합니다.")
+
+            _swc1, _swc2 = st.columns(2)
+            with _swc1:
+                _sw_project_name = st.text_input("공사명", placeholder="예: 본관 A361호 공조덕트 보수공사", key="sw_project_name")
+                st.markdown(
+                    """
+<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;'>
+  <div style='font-size:0.95rem;font-weight:600;color:rgb(38, 39, 48);'>업체명</div>
+  <a href='http://p.kist.re.kr:8081/nxui/kistis/indexQ.jsp?target=mis.pur::pur_1310.xfdl&menuParam=sysCd=CUS'
+     target='_blank'
+     style='font-size:0.78rem;color:#1a73e8;text-decoration:none;white-space:nowrap;'>업체등록 또는 정보조회</a>
+</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                _sw_company = st.text_input("업체명 입력", placeholder="예: 유진건설", key="sw_company", label_visibility="collapsed")
+                _sw_ceo = st.text_input("대표자", placeholder="예: 도현수", key="sw_ceo")
+                _sw_biz_no = st.text_input("사업자등록번호", placeholder="예: 123-45-67890", key="sw_biz_no")
+                _sw_address = st.text_area("주소", placeholder="예: 서울시 성북구 화랑로 1026-0708번지", height=100, key="sw_address")
+                _sw_seal_file = st.file_uploader("직인 이미지 업로드", type=["png", "jpg", "jpeg", "webp"], key="sw_seal_file")
+            with _swc2:
+                _sw_contract_date = st.date_input("계약일자", value=datetime.today(), key="sw_contract_date")
+                _sw_start_date = st.date_input("공사 시작일", value=datetime.today(), key="sw_start_date")
+                _sw_end_date = st.date_input("공사 종료일", value=datetime.today(), key="sw_end_date")
+                _sw_base_amount = st.number_input("통제금액 / 기초금액 (원)", min_value=0, value=0, step=100_000, format="%d", key="sw_base_amount")
+                _sw_contract_amount = st.number_input("계약금액 (원, 부가세 포함)", min_value=0, value=0, step=100_000, format="%d", key="sw_contract_amount")
+                _sw_contract_method = st.text_input("계약방법", value="수의계약", key="sw_contract_method")
+                _sw_defect_label = st.selectbox(
+                    "하자보증금율",
+                    ["건설업종 3%", "조경 5%", "전기, 통신, 소방 등 건설업종 외의 공사 2%"],
+                    index=0,
+                    key="sw_defect_label",
+                )
+                _sw_defect_period = st.text_input("하자보수책임기간", value="2년", key="sw_defect_period")
+
+            with st.expander("생성 내용 미리 보기", expanded=True):
+                st.markdown(
+                    f"""
+- 공사명: {_sw_project_name or '-'}
+- 계약일자: {_sw_contract_date.strftime('%Y-%m-%d')}
+- 공사기간: {_sw_start_date.strftime('%Y-%m-%d')} ~ {_sw_end_date.strftime('%Y-%m-%d')}
+- 계약업체명: {_sw_company or '-'}
+- 대표자: {_sw_ceo or '-'}
+- 사업자등록번호: {_sw_biz_no or '-'}
+- 주소: {_sw_address or '-'}
+- 통제금액/기초금액: {_sw_base_amount:,}원
+- 계약금액: {_sw_contract_amount:,}원
+- 계약방법: {_sw_contract_method or '-'}
+- 하자보증금율: {_sw_defect_label}
+- 하자보수책임기간: {_sw_defect_period or '-'}
+- 직인 이미지: {'업로드됨' if _sw_seal_file else '기본 직인 사용'}
+                    """
+                )
+
+            _missing = []
+            if not _sw_project_name.strip():
+                _missing.append("공사명")
+            if not _sw_company.strip():
+                _missing.append("업체명")
+            if not _sw_ceo.strip():
+                _missing.append("대표자")
+            if not _sw_address.strip():
+                _missing.append("주소")
+            if _sw_contract_amount <= 0:
+                _missing.append("계약금액")
+            if _sw_end_date < _sw_start_date:
+                st.error("공사 종료일은 시작일보다 빠를 수 없습니다.")
+                _missing.append("공사기간")
+
+            if _missing:
+                st.caption("입력 필요: " + ", ".join(_missing))
+
+            _btn1, _btn2, _btn3 = st.columns(3)
+            with _btn1:
+                _sw_generate_clicked = st.button("📄 서류 생성", type="primary", use_container_width=True, key="sw_generate_btn")
+            with _btn2:
+                st.button("PDF 변환", use_container_width=True, disabled=True, key="sw_pdf_btn")
+            with _btn3:
+                st.button("계약요청 문구 복사", use_container_width=True, disabled=True, key="sw_copy_btn")
+
+            if _sw_generate_clicked:
+                if _missing:
+                    st.error("필수 입력값을 먼저 확인하세요: " + ", ".join(_missing))
+                else:
+                    try:
+                        _xlsx_bytes, _xlsx_name = build_small_work_doc_xlsx({
+                            "contract_date": _sw_contract_date,
+                            "start_date": _sw_start_date,
+                            "end_date": _sw_end_date,
+                            "project_name": _sw_project_name.strip(),
+                            "base_amount": _sw_base_amount,
+                            "contract_amount": _sw_contract_amount,
+                            "contract_method": _sw_contract_method.strip() or "수의계약",
+                            "company_name": _sw_company.strip(),
+                            "biz_no": _sw_biz_no.strip(),
+                            "ceo_name": _sw_ceo.strip(),
+                            "address": _sw_address.strip(),
+                            "defect_label": _sw_defect_label,
+                            "defect_rate": {
+                                "건설업종 3%": 0.03,
+                                "조경 5%": 0.05,
+                                "전기, 통신, 소방 등 건설업종 외의 공사 2%": 0.02,
+                            }[_sw_defect_label],
+                            "defect_period": _sw_defect_period.strip() or "2년",
+                            "seal_image_bytes": _sw_seal_file.getvalue() if _sw_seal_file else None,
+                        })
+                        st.success("양식 파일 생성 완료")
+                        st.download_button(
+                            label="⬇️ Excel 다운로드",
+                            data=_xlsx_bytes,
+                            file_name=_xlsx_name,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            key="sw_download_btn",
+                        )
+                    except Exception as _e:
+                        st.error(f"서류 생성 오류: {_e}")
+
+            st.caption("참고: 원본 양식의 수식을 유지하며, 지급각서의 외부참조 수식 2개와 하자각서 날짜는 생성 시 자동 보정합니다.")
 
 
     # ── Tab 4: 부서정보 편집 ──────────────────────────────────
