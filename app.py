@@ -4,7 +4,7 @@ AI 보고서 자동 생성기 - Streamlit 웹앱
 """
 import streamlit as st
 import streamlit.components.v1 as components
-import os, re, sys, tempfile, zipfile, hashlib, glob
+import os, re, sys, tempfile, zipfile, hashlib, glob, shutil, subprocess
 from io import BytesIO
 from datetime import datetime
 
@@ -612,6 +612,120 @@ def _fmt_korean_date_text(_dt) -> str:
     return f"{_dt.year}   년  {_dt.month}월    {_dt.day}일"
 
 
+def find_integrity_pledge_template() -> str | None:
+    _candidates = [
+        os.path.join(os.path.dirname(__file__), "templates", "청렴계약이행각서_양식.hwp"),
+        os.path.join(os.path.expanduser("~"), "Desktop", "소액공사 자료", "청렴계약이행각서_양식.hwp"),
+        "/mnt/c/Users/진광진광/Desktop/소액공사 자료/청렴계약이행각서_양식.hwp",
+    ]
+    _candidates.extend(glob.glob("/mnt/c/Users/*/Desktop/소액공사 자료/청렴계약이행각서_양식.hwp"))
+    for _path in _candidates:
+        if _path and os.path.exists(_path):
+            return _path
+    return None
+
+
+def _wsl_path_to_windows(_path: str) -> str:
+    _path = os.path.abspath(_path)
+    if _path.startswith("/mnt/") and len(_path) > 6:
+        _drive = _path[5].upper()
+        _rest = _path[7:].replace("/", "\\")
+        return f"{_drive}:\\{_rest}"
+    return _path
+
+
+def build_integrity_pledge_hwp(data: dict) -> tuple[bytes, str]:
+    _template_path = find_integrity_pledge_template()
+    if not _template_path:
+        raise FileNotFoundError("청렴계약이행각서 양식 파일을 찾지 못했습니다. Desktop/소액공사 자료 폴더를 확인하세요.")
+
+    _safe_name = re.sub(r'[\\/:*?"<>|]+', '_', data.get("project_name", "소액공사"))[:80]
+    _file_name = f"청렴계약이행각서_{_safe_name}_{data['contract_date'].strftime('%Y%m%d')}.hwp"
+
+    _work_dir = os.path.join("/mnt/c/Temp", f"kist_hwp_{os.getpid()}")
+    os.makedirs(_work_dir, exist_ok=True)
+    _template_copy = os.path.join(_work_dir, "integrity_template.hwp")
+    _output_path = os.path.join(_work_dir, "integrity_output.hwp")
+    _script_path = os.path.join(_work_dir, "make_integrity.ps1")
+    _seal_path = ""
+
+    try:
+        shutil.copyfile(_template_path, _template_copy)
+        _seal_image_bytes = data.get("seal_image_bytes")
+        if _seal_image_bytes:
+            from PIL import Image as PILImage
+            _seal_path = os.path.join(_work_dir, "seal.png")
+            with PILImage.open(BytesIO(_seal_image_bytes)) as _img:
+                _img = _img.convert("RGBA")
+                _img.save(_seal_path, format="PNG")
+
+        _ps_script = r'''
+param(
+  [string]$TemplatePath,
+  [string]$OutputPath,
+  [string]$CeoName,
+  [string]$SealPath
+)
+$ErrorActionPreference='Stop'
+$h = New-Object -ComObject HWPFrame.HwpObject
+try {
+  try { $h.RegisterModule('FilePathCheckDLL','FilePathCheckerModule') | Out-Null } catch {}
+  try { $h.XHwpWindows.Item(0).Visible = $false } catch {}
+  if (-not $h.Open($TemplatePath,'HWP','forceopen:true')) { throw "HWP template open failed: $TemplatePath" }
+
+  $pset = $h.HParameterSet.HFindReplace
+  $h.HAction.GetDefault('AllReplace', $pset.HSet) | Out-Null
+  $pset.FindString = '업체대표자'
+  $pset.ReplaceString = $CeoName
+  $pset.IgnoreMessage = 1
+  $pset.ReplaceMode = 1
+  $h.HAction.Execute('AllReplace', $pset.HSet) | Out-Null
+
+  if ($SealPath -and (Test-Path $SealPath)) {
+    $pset = $h.HParameterSet.HFindReplace
+    $h.HAction.GetDefault('RepeatFind', $pset.HSet) | Out-Null
+    $pset.FindString = '(인)'
+    $pset.IgnoreMessage = 1
+    $pset.Direction = 0
+    $found = $h.HAction.Execute('RepeatFind', $pset.HSet)
+    if ($found) {
+      try { $h.HAction.Run('MoveRight') | Out-Null } catch {}
+      try { $h.InsertPicture($SealPath, $true, 1, $false, $false, 0, 18, 18) | Out-Null }
+      catch { $h.InsertPicture($SealPath) | Out-Null }
+    }
+  }
+
+  $ok = $h.SaveAs($OutputPath, 'HWP', '')
+  if (-not $ok) { throw "HWP save failed: $OutputPath" }
+} finally {
+  try { $h.Quit() | Out-Null } catch {}
+}
+'''
+        with open(_script_path, "wb") as _f:
+            _f.write(b"\xff\xfe" + _ps_script.encode("utf-16le"))
+
+        _cmd = [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", _wsl_path_to_windows(_script_path),
+            "-TemplatePath", _wsl_path_to_windows(_template_copy),
+            "-OutputPath", _wsl_path_to_windows(_output_path),
+            "-CeoName", data.get("ceo_name", "").strip(),
+            "-SealPath", _wsl_path_to_windows(_seal_path) if _seal_path else "",
+        ]
+        _result = subprocess.run(_cmd, capture_output=True, text=True, timeout=180)
+        if _result.returncode != 0:
+            raise RuntimeError((_result.stderr or _result.stdout or "HWP 생성 실패").strip())
+        with open(_output_path, "rb") as _f:
+            return _f.read(), _file_name
+    finally:
+        try:
+            shutil.rmtree(_work_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def build_small_work_doc_xlsx(data: dict) -> tuple[bytes, str]:
     _template_path = find_small_work_template()
     if not _template_path:
@@ -664,16 +778,18 @@ def build_small_work_doc_xlsx(data: dict) -> tuple[bytes, str]:
     if _defect_label in _mark_map:
         _ws_defect[_mark_map[_defect_label]] = "☑"
 
+    # 원본 양식에 들어있는 기본 직인은 항상 제거합니다.
+    # 사용자가 직인 이미지를 업로드한 경우에만 새 직인을 삽입합니다.
+    _ws_accept._images = []
+    _ws_pay._images = []
+    _ws_defect._images = []
+
     if _seal_image_bytes:
         _png_bytes = BytesIO()
         with PILImage.open(BytesIO(_seal_image_bytes)) as _img:
             _img = _img.convert("RGBA").resize((52, 60))
             _img.save(_png_bytes, format="PNG")
         _png_bytes.seek(0)
-
-        _ws_accept._images = []
-        _ws_pay._images = []
-        _ws_defect._images = []
 
         _img1 = XLImage(BytesIO(_png_bytes.getvalue()))
         _ws_accept.add_image(_img1, "D30")
@@ -1810,7 +1926,7 @@ with _main_col:
             else:
                 st.warning("양식 파일을 찾지 못했습니다. Desktop/소액공사 자료/승락서,지급각서,하자각서.xlsx 위치를 확인하세요.")
 
-            st.caption("승락서 · 지급각서 · 하자보수책임각서를 하나의 Excel 파일로 생성합니다.")
+            st.caption("승락서 · 지급각서 · 하자보수책임각서 · 청렴계약 이행각서를 생성합니다.")
 
             _swc1, _swc2 = st.columns(2)
             with _swc1:
@@ -1828,7 +1944,6 @@ with _main_col:
                 )
                 _sw_company = st.text_input("업체명 입력", placeholder="예: 유진건설", key="sw_company", label_visibility="collapsed")
                 _sw_ceo = st.text_input("대표자", placeholder="예: 도현수", key="sw_ceo")
-                _sw_biz_no = st.text_input("사업자등록번호", placeholder="예: 123-45-67890", key="sw_biz_no")
                 _sw_address = st.text_area("주소", placeholder="예: 서울시 성북구 화랑로 1026-0708번지", height=100, key="sw_address")
                 _sw_seal_file = st.file_uploader("직인 이미지 업로드", type=["png", "jpg", "jpeg", "webp"], key="sw_seal_file")
             with _swc2:
@@ -1854,14 +1969,13 @@ with _main_col:
 - 공사기간: {_sw_start_date.strftime('%Y-%m-%d')} ~ {_sw_end_date.strftime('%Y-%m-%d')}
 - 계약업체명: {_sw_company or '-'}
 - 대표자: {_sw_ceo or '-'}
-- 사업자등록번호: {_sw_biz_no or '-'}
 - 주소: {_sw_address or '-'}
 - 통제금액/기초금액: {_sw_base_amount:,}원
 - 계약금액: {_sw_contract_amount:,}원
 - 계약방법: {_sw_contract_method or '-'}
 - 하자보증금율: {_sw_defect_label}
 - 하자보수책임기간: {_sw_defect_period or '-'}
-- 직인 이미지: {'업로드됨' if _sw_seal_file else '기본 직인 사용'}
+- 직인 이미지: {'업로드됨' if _sw_seal_file else '없음'}
                     """
                 )
 
@@ -1896,7 +2010,7 @@ with _main_col:
                     st.error("필수 입력값을 먼저 확인하세요: " + ", ".join(_missing))
                 else:
                     try:
-                        _xlsx_bytes, _xlsx_name = build_small_work_doc_xlsx({
+                        _small_work_data = {
                             "contract_date": _sw_contract_date,
                             "start_date": _sw_start_date,
                             "end_date": _sw_end_date,
@@ -1905,7 +2019,6 @@ with _main_col:
                             "contract_amount": _sw_contract_amount,
                             "contract_method": _sw_contract_method.strip() or "수의계약",
                             "company_name": _sw_company.strip(),
-                            "biz_no": _sw_biz_no.strip(),
                             "ceo_name": _sw_ceo.strip(),
                             "address": _sw_address.strip(),
                             "defect_label": _sw_defect_label,
@@ -1916,15 +2029,41 @@ with _main_col:
                             }[_sw_defect_label],
                             "defect_period": _sw_defect_period.strip() or "2년",
                             "seal_image_bytes": _sw_seal_file.getvalue() if _sw_seal_file else None,
-                        })
+                        }
+                        _xlsx_bytes, _xlsx_name = build_small_work_doc_xlsx(_small_work_data)
+                        _hwp_bytes, _hwp_name = build_integrity_pledge_hwp(_small_work_data)
+
+                        _zip_buf = BytesIO()
+                        with zipfile.ZipFile(_zip_buf, "w", zipfile.ZIP_DEFLATED) as _zip:
+                            _zip.writestr(_xlsx_name, _xlsx_bytes)
+                            _zip.writestr(_hwp_name, _hwp_bytes)
+                        _zip_buf.seek(0)
+                        _zip_name = f"소액공사서류_{re.sub(r'[\\/:*?\"<>|]+', '_', _sw_project_name.strip())[:80]}_{_sw_contract_date.strftime('%Y%m%d')}.zip"
+
                         st.success("양식 파일 생성 완료")
                         st.download_button(
-                            label="⬇️ Excel 다운로드",
+                            label="⬇️ 전체 서류 ZIP 다운로드",
+                            data=_zip_buf.getvalue(),
+                            file_name=_zip_name,
+                            mime="application/zip",
+                            use_container_width=True,
+                            key="sw_download_zip_btn",
+                        )
+                        st.download_button(
+                            label="⬇️ Excel만 다운로드",
                             data=_xlsx_bytes,
                             file_name=_xlsx_name,
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             use_container_width=True,
-                            key="sw_download_btn",
+                            key="sw_download_xlsx_btn",
+                        )
+                        st.download_button(
+                            label="⬇️ 청렴계약 이행각서 HWP만 다운로드",
+                            data=_hwp_bytes,
+                            file_name=_hwp_name,
+                            mime="application/x-hwp",
+                            use_container_width=True,
+                            key="sw_download_hwp_btn",
                         )
                     except Exception as _e:
                         st.error(f"서류 생성 오류: {_e}")
