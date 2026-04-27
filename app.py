@@ -612,6 +612,23 @@ def _fmt_korean_date_text(_dt) -> str:
     return f"{_dt.year}   년  {_dt.month}월    {_dt.day}일"
 
 
+def _parse_amount_text(raw) -> int:
+    _digits = re.sub(r"[^\d]", "", str(raw or ""))
+    return int(_digits) if _digits else 0
+
+
+def _format_amount_text(value) -> str:
+    try:
+        _n = int(value or 0)
+    except Exception:
+        _n = 0
+    return f"{_n:,}" if _n else "0"
+
+
+def _normalize_amount_text(key: str):
+    st.session_state[key] = _format_amount_text(_parse_amount_text(st.session_state.get(key, "")))
+
+
 def _load_korean_font(size: int, bold: bool = False):
     from PIL import ImageFont
 
@@ -2049,8 +2066,24 @@ with _main_col:
                 _sw_contract_date = st.date_input("계약일자", value=datetime.today(), key="sw_contract_date")
                 _sw_start_date = st.date_input("공사 시작일", value=datetime.today(), key="sw_start_date")
                 _sw_end_date = st.date_input("공사 종료일", value=datetime.today(), key="sw_end_date")
-                _sw_base_amount = st.number_input("통제금액 / 기초금액 (원)", min_value=0, value=0, step=100_000, format="%d", key="sw_base_amount")
-                _sw_contract_amount = st.number_input("계약금액 (원, 부가세 포함)", min_value=0, value=0, step=100_000, format="%d", key="sw_contract_amount")
+                if "sw_base_amount_text" not in st.session_state:
+                    st.session_state["sw_base_amount_text"] = _format_amount_text(st.session_state.get("sw_base_amount", 0))
+                if "sw_contract_amount_text" not in st.session_state:
+                    st.session_state["sw_contract_amount_text"] = _format_amount_text(st.session_state.get("sw_contract_amount", 0))
+                _sw_base_amount_raw = st.text_input(
+                    "통제금액 / 기초금액 (원)",
+                    key="sw_base_amount_text",
+                    on_change=_normalize_amount_text,
+                    args=("sw_base_amount_text",),
+                )
+                _sw_base_amount = _parse_amount_text(_sw_base_amount_raw)
+                _sw_contract_amount_raw = st.text_input(
+                    "계약금액 (원, 부가세 포함)",
+                    key="sw_contract_amount_text",
+                    on_change=_normalize_amount_text,
+                    args=("sw_contract_amount_text",),
+                )
+                _sw_contract_amount = _parse_amount_text(_sw_contract_amount_raw)
                 _sw_contract_method = st.text_input("계약방법", value="수의계약", key="sw_contract_method")
                 _sw_defect_label = st.selectbox(
                     "하자보증금율",
