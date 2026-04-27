@@ -612,118 +612,163 @@ def _fmt_korean_date_text(_dt) -> str:
     return f"{_dt.year}   년  {_dt.month}월    {_dt.day}일"
 
 
-def find_integrity_pledge_template() -> str | None:
-    _candidates = [
-        os.path.join(os.path.dirname(__file__), "templates", "청렴계약이행각서_양식.hwp"),
-        os.path.join(os.path.expanduser("~"), "Desktop", "소액공사 자료", "청렴계약이행각서_양식.hwp"),
-        "/mnt/c/Users/진광진광/Desktop/소액공사 자료/청렴계약이행각서_양식.hwp",
-    ]
-    _candidates.extend(glob.glob("/mnt/c/Users/*/Desktop/소액공사 자료/청렴계약이행각서_양식.hwp"))
+def _load_korean_font(size: int, bold: bool = False):
+    from PIL import ImageFont
+
+    _candidates = []
+    if bold:
+        _candidates.extend([
+            r"C:\Windows\Fonts\malgunbd.ttf",
+            "/mnt/c/Windows/Fonts/malgunbd.ttf",
+        ])
+    _candidates.extend([
+        r"C:\Windows\Fonts\malgun.ttf",
+        "/mnt/c/Windows/Fonts/malgun.ttf",
+        r"C:\Windows\Fonts\gulim.ttc",
+        "/mnt/c/Windows/Fonts/gulim.ttc",
+    ])
     for _path in _candidates:
-        if _path and os.path.exists(_path):
-            return _path
-    return None
-
-
-def _wsl_path_to_windows(_path: str) -> str:
-    _path = os.path.abspath(_path)
-    if _path.startswith("/mnt/") and len(_path) > 6:
-        _drive = _path[5].upper()
-        _rest = _path[7:].replace("/", "\\")
-        return f"{_drive}:\\{_rest}"
-    return _path
-
-
-def build_integrity_pledge_hwp(data: dict) -> tuple[bytes, str]:
-    _template_path = find_integrity_pledge_template()
-    if not _template_path:
-        raise FileNotFoundError("청렴계약이행각서 양식 파일을 찾지 못했습니다. Desktop/소액공사 자료 폴더를 확인하세요.")
-
-    _safe_name = re.sub(r'[\\/:*?"<>|]+', '_', data.get("project_name", "소액공사"))[:80]
-    _file_name = f"청렴계약이행각서_{_safe_name}_{data['contract_date'].strftime('%Y%m%d')}.hwp"
-
-    _work_dir = os.path.join("/mnt/c/Temp", f"kist_hwp_{os.getpid()}")
-    os.makedirs(_work_dir, exist_ok=True)
-    _template_copy = os.path.join(_work_dir, "integrity_template.hwp")
-    _output_path = os.path.join(_work_dir, "integrity_output.hwp")
-    _script_path = os.path.join(_work_dir, "make_integrity.ps1")
-    _seal_path = ""
-
-    try:
-        shutil.copyfile(_template_path, _template_copy)
-        _seal_image_bytes = data.get("seal_image_bytes")
-        if _seal_image_bytes:
-            from PIL import Image as PILImage
-            _seal_path = os.path.join(_work_dir, "seal.png")
-            with PILImage.open(BytesIO(_seal_image_bytes)) as _img:
-                _img = _img.convert("RGBA")
-                _img.save(_seal_path, format="PNG")
-
-        _ps_script = r'''
-param(
-  [string]$TemplatePath,
-  [string]$OutputPath,
-  [string]$CeoName,
-  [string]$SealPath
-)
-$ErrorActionPreference='Stop'
-$h = New-Object -ComObject HWPFrame.HwpObject
-try {
-  try { $h.RegisterModule('FilePathCheckDLL','FilePathCheckerModule') | Out-Null } catch {}
-  try { $h.XHwpWindows.Item(0).Visible = $false } catch {}
-  if (-not $h.Open($TemplatePath,'HWP','forceopen:true')) { throw "HWP template open failed: $TemplatePath" }
-
-  $pset = $h.HParameterSet.HFindReplace
-  $h.HAction.GetDefault('AllReplace', $pset.HSet) | Out-Null
-  $pset.FindString = '업체대표자'
-  $pset.ReplaceString = $CeoName
-  $pset.IgnoreMessage = 1
-  $pset.ReplaceMode = 1
-  $h.HAction.Execute('AllReplace', $pset.HSet) | Out-Null
-
-  if ($SealPath -and (Test-Path $SealPath)) {
-    $pset = $h.HParameterSet.HFindReplace
-    $h.HAction.GetDefault('RepeatFind', $pset.HSet) | Out-Null
-    $pset.FindString = '(인)'
-    $pset.IgnoreMessage = 1
-    $pset.Direction = 0
-    $found = $h.HAction.Execute('RepeatFind', $pset.HSet)
-    if ($found) {
-      try { $h.HAction.Run('MoveRight') | Out-Null } catch {}
-      try { $h.InsertPicture($SealPath, $true, 1, $false, $false, 0, 18, 18) | Out-Null }
-      catch { $h.InsertPicture($SealPath) | Out-Null }
-    }
-  }
-
-  $ok = $h.SaveAs($OutputPath, 'HWP', '')
-  if (-not $ok) { throw "HWP save failed: $OutputPath" }
-} finally {
-  try { $h.Quit() | Out-Null } catch {}
-}
-'''
-        with open(_script_path, "wb") as _f:
-            _f.write(b"\xff\xfe" + _ps_script.encode("utf-16le"))
-
-        _cmd = [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-File", _wsl_path_to_windows(_script_path),
-            "-TemplatePath", _wsl_path_to_windows(_template_copy),
-            "-OutputPath", _wsl_path_to_windows(_output_path),
-            "-CeoName", data.get("ceo_name", "").strip(),
-            "-SealPath", _wsl_path_to_windows(_seal_path) if _seal_path else "",
-        ]
-        _result = subprocess.run(_cmd, capture_output=True, text=True, timeout=180)
-        if _result.returncode != 0:
-            raise RuntimeError((_result.stderr or _result.stdout or "HWP 생성 실패").strip())
-        with open(_output_path, "rb") as _f:
-            return _f.read(), _file_name
-    finally:
         try:
-            shutil.rmtree(_work_dir, ignore_errors=True)
+            if os.path.exists(_path):
+                return ImageFont.truetype(_path, size=size)
         except Exception:
             pass
+    return ImageFont.load_default()
+
+
+def _wrap_text_for_draw(_draw, text: str, font, max_width: int) -> list[str]:
+    if not text:
+        return [""]
+
+    _lines = []
+    for _para in str(text).splitlines() or [""]:
+        _para = _para.rstrip()
+        if not _para:
+            _lines.append("")
+            continue
+        _buf = ""
+        for _ch in _para:
+            _trial = _buf + _ch
+            _bbox = _draw.textbbox((0, 0), _trial, font=font)
+            _w = _bbox[2] - _bbox[0]
+            if _buf and _w > max_width:
+                _lines.append(_buf)
+                _buf = _ch
+            else:
+                _buf = _trial
+        if _buf:
+            _lines.append(_buf)
+    return _lines or [""]
+
+
+def _draw_wrapped_block(_draw, text: str, font, x: int, y: int, max_width: int, line_gap: int = 10):
+    _lines = _wrap_text_for_draw(_draw, text, font, max_width)
+    _line_h = (_draw.textbbox((0, 0), "가", font=font)[3] - _draw.textbbox((0, 0), "가", font=font)[1])
+    _cursor_y = y
+    for _line in _lines:
+        _draw.text((x, _cursor_y), _line, font=font, fill="black")
+        _cursor_y += _line_h + line_gap
+    return _cursor_y
+
+
+def build_integrity_pledge_pdf(data: dict) -> tuple[bytes, str]:
+    from PIL import Image as PILImage, ImageDraw
+
+    _safe_name = re.sub(r'[\\/:*?"<>|]+', '_', data.get("project_name", "소액공사"))[:80]
+    _file_name = f"청렴계약이행각서_{_safe_name}_{data['contract_date'].strftime('%Y%m%d')}.pdf"
+
+    _page_w, _page_h = 1240, 1754  # A4 portrait approx @150dpi
+    _img = PILImage.new("RGB", (_page_w, _page_h), "white")
+    _draw = ImageDraw.Draw(_img)
+
+    _font_title = _load_korean_font(42, bold=True)
+    _font_sub = _load_korean_font(28, bold=True)
+    _font_body = _load_korean_font(24)
+    _font_small = _load_korean_font(20)
+
+    _margin_x = 110
+    _content_w = _page_w - (_margin_x * 2)
+    _y = 120
+
+    _title = "청렴계약 이행각서"
+    _title_bbox = _draw.textbbox((0, 0), _title, font=_font_title)
+    _title_w = _title_bbox[2] - _title_bbox[0]
+    _draw.text(((_page_w - _title_w) // 2, _y), _title, font=_font_title, fill="black")
+    _y += 110
+
+    _project_name = data.get("project_name", "")
+    _company_name = data.get("company_name", "")
+    _ceo_name = data.get("ceo_name", "")
+    _contract_date = data["contract_date"].strftime("%Y-%m-%d")
+    _contract_amount = int(data.get("contract_amount", 0) or 0)
+    _contract_method = data.get("contract_method", "수의계약")
+    _address = data.get("address", "")
+
+    _draw.text((_margin_x, _y), f"공사명: {_project_name}", font=_font_sub, fill="black")
+    _y += 60
+    _draw.text((_margin_x, _y), f"업체명: {_company_name}", font=_font_body, fill="black")
+    _y += 44
+    _draw.text((_margin_x, _y), f"대표자: {_ceo_name}", font=_font_body, fill="black")
+    _y += 44
+    _draw.text((_margin_x, _y), f"주소: {_address}", font=_font_body, fill="black")
+    _y += 44
+    _draw.text((_margin_x, _y), f"계약일자: {_contract_date}", font=_font_body, fill="black")
+    _y += 44
+    _draw.text((_margin_x, _y), f"계약방법: {_contract_method}", font=_font_body, fill="black")
+    _y += 44
+    _draw.text((_margin_x, _y), f"계약금액: {_contract_amount:,}원", font=_font_body, fill="black")
+    _y += 90
+
+    _body_text = (
+        f"상기 공사와 관련하여 {_company_name}의 대표자 {_ceo_name}은(는) 계약 이행 과정에서 "
+        f"관련 법령과 연구원 규정을 준수하고, 금품·향응 제공 등 부정한 행위를 하지 않으며, "
+        f"공정하고 투명한 계약 질서를 해치지 않을 것을 서약합니다. 또한 계약상 의무를 성실히 이행하고, "
+        f"위반 사항이 발생할 경우 연구원의 조치에 따를 것을 확인합니다."
+    )
+    _y = _draw_wrapped_block(_draw, _body_text, _font_body, _margin_x, _y, _content_w, line_gap=14)
+    _y += 70
+
+    _draw.text((_margin_x, _y), "[서약 사항]", font=_font_sub, fill="black")
+    _y += 55
+    _pledges = [
+        "1. 계약 관련 법령, 연구원 규정 및 절차를 성실히 준수합니다.",
+        "2. 금품, 향응, 편의 제공 등 부정한 청탁 또는 부당한 이익을 제공하지 않습니다.",
+        "3. 계약 이행 과정에서 취득한 정보를 부당하게 이용하거나 외부에 유출하지 않습니다.",
+        "4. 위반 사항이 확인될 경우 계약상 불이익 및 연구원의 후속 조치를 감수합니다.",
+    ]
+    for _item in _pledges:
+        _y = _draw_wrapped_block(_draw, _item, _font_body, _margin_x + 10, _y, _content_w - 10, line_gap=10)
+        _y += 16
+
+    _y += 50
+    _date_text = f"{data['contract_date'].year}년 {data['contract_date'].month}월 {data['contract_date'].day}일"
+    _date_bbox = _draw.textbbox((0, 0), _date_text, font=_font_body)
+    _date_w = _date_bbox[2] - _date_bbox[0]
+    _draw.text(((_page_w - _date_w) // 2, _y), _date_text, font=_font_body, fill="black")
+    _y += 120
+
+    _sign_x = _page_w - 430
+    _draw.text((_sign_x, _y), f"업체명 : {_company_name}", font=_font_body, fill="black")
+    _y += 48
+    _draw.text((_sign_x, _y), f"대표자 : {_ceo_name}  (인)", font=_font_body, fill="black")
+
+    _seal_image_bytes = data.get("seal_image_bytes")
+    if _seal_image_bytes:
+        try:
+            with PILImage.open(BytesIO(_seal_image_bytes)) as _seal:
+                _seal = _seal.convert("RGBA")
+                _seal.thumbnail((120, 120))
+                _img.paste(_seal, (_sign_x + 210, _y - 35), _seal)
+        except Exception:
+            pass
+
+    _footer = "※ 본 문서는 시스템에서 자동 생성된 PDF 초안입니다. 필요 시 최종 문구를 검토 후 사용하세요."
+    _draw.text((_margin_x, _page_h - 90), _footer, font=_font_small, fill="gray")
+
+    _buf = BytesIO()
+    _img.save(_buf, format="PDF", resolution=150.0)
+    _buf.seek(0)
+    return _buf.getvalue(), _file_name
 
 
 def build_small_work_doc_xlsx(data: dict) -> tuple[bytes, str]:
@@ -916,28 +961,29 @@ with _main_col:
 
     # ── Tab 1: 보고서 생성 ────────────────────────────────────
     with tab1:
-        st.subheader("초안 입력")
+        st.subheader("보고서 초안 입력")
 
         _draft_title = st.text_input(
-            "제목",
-            placeholder="예: 시설운영팀 에너지절감 아이디어 회의",
+            "보고서 제목",
+            placeholder="예: 2026년 4월 시설공사 추진 현황 보고",
             key="draft_title_input",
         )
 
         _draft_body = st.text_area(
-            "주요내용",
-            placeholder="여기에 내용을 입력해주세요",
+            "핵심 내용 / 메모",
+            placeholder="예: 공사 목적, 진행 현황, 주요 일정, 참석자, 요청사항 등을 자유롭게 적어주세요.",
             height=140,
             key="draft_body_input",
         )
 
         _gen_col1, _gen_col2 = st.columns([4, 1])
         with _gen_col2:
-            generate_btn = st.button("🚀 생성", type="primary", use_container_width=True)
+            generate_btn = st.button("🚀 보고서 초안 생성", type="primary", use_container_width=True)
 
-        st.markdown('예시 내용: "시설운영팀 에너지절감 아이디어 회의"')
-        st.markdown("→ 회의 또는 업무 목적을 한두 문장으로 간단히 작성해주세요.")
-        st.markdown("→ 참여자 및 역할은 자유 형식으로 입력해주세요.<br>&nbsp;&nbsp;&nbsp;&nbsp;(예: 보고서 김진광, 기획 서진영·안일진, 설비 고석일 주임 등)", unsafe_allow_html=True)
+        st.markdown('입력 예시: "2026년 4월 시설공사 추진 현황 보고"')
+        st.markdown("→ 보고 목적, 배경, 현재 상황을 1~3문장 정도로 간단히 적어주세요.")
+        st.markdown("→ 날짜, 장소, 참석자, 요청사항, 후속조치가 있으면 함께 적어주면 더 정확한 초안이 생성됩니다.")
+        st.markdown("→ 자유 메모 형식으로 작성해도 되며, AI가 보고서 형식으로 정리합니다.")
 
         if generate_btn and (_draft_title.strip() or _draft_body.strip()):
             _draft_keywords = []
@@ -2001,7 +2047,7 @@ with _main_col:
             with _btn1:
                 _sw_generate_clicked = st.button("📄 서류 생성", type="primary", use_container_width=True, key="sw_generate_btn")
             with _btn2:
-                st.button("PDF 변환", use_container_width=True, disabled=True, key="sw_pdf_btn")
+                st.button("PDF 자동 포함", use_container_width=True, disabled=True, key="sw_pdf_btn")
             with _btn3:
                 st.button("계약요청 문구 복사", use_container_width=True, disabled=True, key="sw_copy_btn")
 
@@ -2031,12 +2077,12 @@ with _main_col:
                             "seal_image_bytes": _sw_seal_file.getvalue() if _sw_seal_file else None,
                         }
                         _xlsx_bytes, _xlsx_name = build_small_work_doc_xlsx(_small_work_data)
-                        _hwp_bytes, _hwp_name = build_integrity_pledge_hwp(_small_work_data)
+                        _pdf_bytes, _pdf_name = build_integrity_pledge_pdf(_small_work_data)
 
                         _zip_buf = BytesIO()
                         with zipfile.ZipFile(_zip_buf, "w", zipfile.ZIP_DEFLATED) as _zip:
                             _zip.writestr(_xlsx_name, _xlsx_bytes)
-                            _zip.writestr(_hwp_name, _hwp_bytes)
+                            _zip.writestr(_pdf_name, _pdf_bytes)
                         _zip_buf.seek(0)
                         _zip_name = f"소액공사서류_{re.sub(r'[\\/:*?\"<>|]+', '_', _sw_project_name.strip())[:80]}_{_sw_contract_date.strftime('%Y%m%d')}.zip"
 
@@ -2058,12 +2104,12 @@ with _main_col:
                             key="sw_download_xlsx_btn",
                         )
                         st.download_button(
-                            label="⬇️ 청렴계약 이행각서 HWP만 다운로드",
-                            data=_hwp_bytes,
-                            file_name=_hwp_name,
-                            mime="application/x-hwp",
+                            label="⬇️ 청렴계약 이행각서 PDF만 다운로드",
+                            data=_pdf_bytes,
+                            file_name=_pdf_name,
+                            mime="application/pdf",
                             use_container_width=True,
-                            key="sw_download_hwp_btn",
+                            key="sw_download_pdf_btn",
                         )
                     except Exception as _e:
                         st.error(f"서류 생성 오류: {_e}")
