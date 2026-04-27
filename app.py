@@ -672,103 +672,108 @@ def _draw_wrapped_block(_draw, text: str, font, x: int, y: int, max_width: int, 
 
 
 def build_integrity_pledge_pdf(data: dict) -> tuple[bytes, str]:
-    from PIL import Image as PILImage, ImageDraw
+    from reportlab.pdfgen import canvas
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from pypdf import PdfReader, PdfWriter
+    import pdfplumber
+
+    _template_path = os.path.join(os.path.dirname(__file__), "templates", "청렴계약이행각서_양식.pdf")
+    if not os.path.exists(_template_path):
+        raise FileNotFoundError("청렴계약이행각서 PDF 양식 파일을 찾지 못했습니다. templates 폴더를 확인하세요.")
 
     _safe_name = re.sub(r'[\\/:*?"<>|]+', '_', data.get("project_name", "소액공사"))[:80]
     _file_name = f"청렴계약이행각서_{_safe_name}_{data['contract_date'].strftime('%Y%m%d')}.pdf"
 
-    _page_w, _page_h = 1240, 1754  # A4 portrait approx @150dpi
-    _img = PILImage.new("RGB", (_page_w, _page_h), "white")
-    _draw = ImageDraw.Draw(_img)
+    _reader = PdfReader(_template_path)
+    _page = _reader.pages[0]
+    _page_w = float(_page.mediabox.width)
+    _page_h = float(_page.mediabox.height)
 
-    _font_title = _load_korean_font(42, bold=True)
-    _font_sub = _load_korean_font(28, bold=True)
-    _font_body = _load_korean_font(24)
-    _font_small = _load_korean_font(20)
+    _anchor = None
+    with pdfplumber.open(_template_path) as _pdf:
+        _words = _pdf.pages[0].extract_words()
+        for _w in _words:
+            if "업체대표자" in _w.get("text", ""):
+                _anchor = _w
+                break
 
-    _margin_x = 110
-    _content_w = _page_w - (_margin_x * 2)
-    _y = 120
+    if not _anchor:
+        raise RuntimeError("청렴계약이행각서 PDF 양식에서 서약자 위치를 찾지 못했습니다.")
 
-    _title = "청렴계약 이행각서"
-    _title_bbox = _draw.textbbox((0, 0), _title, font=_font_title)
-    _title_w = _title_bbox[2] - _title_bbox[0]
-    _draw.text(((_page_w - _title_w) // 2, _y), _title, font=_font_title, fill="black")
-    _y += 110
-
-    _project_name = data.get("project_name", "")
-    _company_name = data.get("company_name", "")
-    _ceo_name = data.get("ceo_name", "")
-    _contract_date = data["contract_date"].strftime("%Y-%m-%d")
-    _contract_amount = int(data.get("contract_amount", 0) or 0)
-    _contract_method = data.get("contract_method", "수의계약")
-    _address = data.get("address", "")
-
-    _draw.text((_margin_x, _y), f"공사명: {_project_name}", font=_font_sub, fill="black")
-    _y += 60
-    _draw.text((_margin_x, _y), f"업체명: {_company_name}", font=_font_body, fill="black")
-    _y += 44
-    _draw.text((_margin_x, _y), f"대표자: {_ceo_name}", font=_font_body, fill="black")
-    _y += 44
-    _draw.text((_margin_x, _y), f"주소: {_address}", font=_font_body, fill="black")
-    _y += 44
-    _draw.text((_margin_x, _y), f"계약일자: {_contract_date}", font=_font_body, fill="black")
-    _y += 44
-    _draw.text((_margin_x, _y), f"계약방법: {_contract_method}", font=_font_body, fill="black")
-    _y += 44
-    _draw.text((_margin_x, _y), f"계약금액: {_contract_amount:,}원", font=_font_body, fill="black")
-    _y += 90
-
-    _body_text = (
-        f"상기 공사와 관련하여 {_company_name}의 대표자 {_ceo_name}은(는) 계약 이행 과정에서 "
-        f"관련 법령과 연구원 규정을 준수하고, 금품·향응 제공 등 부정한 행위를 하지 않으며, "
-        f"공정하고 투명한 계약 질서를 해치지 않을 것을 서약합니다. 또한 계약상 의무를 성실히 이행하고, "
-        f"위반 사항이 발생할 경우 연구원의 조치에 따를 것을 확인합니다."
-    )
-    _y = _draw_wrapped_block(_draw, _body_text, _font_body, _margin_x, _y, _content_w, line_gap=14)
-    _y += 70
-
-    _draw.text((_margin_x, _y), "[서약 사항]", font=_font_sub, fill="black")
-    _y += 55
-    _pledges = [
-        "1. 계약 관련 법령, 연구원 규정 및 절차를 성실히 준수합니다.",
-        "2. 금품, 향응, 편의 제공 등 부정한 청탁 또는 부당한 이익을 제공하지 않습니다.",
-        "3. 계약 이행 과정에서 취득한 정보를 부당하게 이용하거나 외부에 유출하지 않습니다.",
-        "4. 위반 사항이 확인될 경우 계약상 불이익 및 연구원의 후속 조치를 감수합니다.",
+    _font_candidates = [
+        ("MalgunGothic", r"C:\Windows\Fonts\malgun.ttf"),
+        ("MalgunGothic", "/mnt/c/Windows/Fonts/malgun.ttf"),
+        ("Gulim", r"C:\Windows\Fonts\gulim.ttc"),
+        ("Gulim", "/mnt/c/Windows/Fonts/gulim.ttc"),
     ]
-    for _item in _pledges:
-        _y = _draw_wrapped_block(_draw, _item, _font_body, _margin_x + 10, _y, _content_w - 10, line_gap=10)
-        _y += 16
+    _font_name = None
+    for _name, _path in _font_candidates:
+        try:
+            if os.path.exists(_path):
+                try:
+                    pdfmetrics.getFont(_name)
+                except KeyError:
+                    pdfmetrics.registerFont(TTFont(_name, _path))
+                _font_name = _name
+                break
+        except Exception:
+            pass
+    if not _font_name:
+        raise RuntimeError("PDF 한글 폰트를 찾지 못했습니다. Windows 한글 폰트를 확인하세요.")
 
-    _y += 50
-    _date_text = f"{data['contract_date'].year}년 {data['contract_date'].month}월 {data['contract_date'].day}일"
-    _date_bbox = _draw.textbbox((0, 0), _date_text, font=_font_body)
-    _date_w = _date_bbox[2] - _date_bbox[0]
-    _draw.text(((_page_w - _date_w) // 2, _y), _date_text, font=_font_body, fill="black")
-    _y += 120
+    _overlay_buf = BytesIO()
+    _c = canvas.Canvas(_overlay_buf, pagesize=(_page_w, _page_h))
 
-    _sign_x = _page_w - 430
-    _draw.text((_sign_x, _y), f"업체명 : {_company_name}", font=_font_body, fill="black")
-    _y += 48
-    _draw.text((_sign_x, _y), f"대표자 : {_ceo_name}  (인)", font=_font_body, fill="black")
+    _line_text = f"서 약 자 : {data.get('ceo_name', '').strip() or data.get('company_name', '').strip() or '서약자'} (인)"
+    _font_size = 12
+
+    _x0 = float(_anchor["x0"]) - 2
+    _x1 = float(_anchor["x1"]) + 6
+    _top = float(_anchor["top"])
+    _bottom = float(_anchor["bottom"])
+    _y_bottom = _page_h - _bottom
+    _box_h = (_bottom - _top) + 8
+
+    _text_w = pdfmetrics.stringWidth(_line_text, _font_name, _font_size)
+    _text_x = (_page_w - _text_w) / 2
+    _clear_margin = 12
+    _clear_x = min(_x0, _text_x - _clear_margin)
+    _clear_right = max(_x1, _text_x + _text_w + _clear_margin)
+
+    _c.setFillColorRGB(1, 1, 1)
+    _c.rect(_clear_x, _y_bottom - 2, _clear_right - _clear_x, _box_h, fill=1, stroke=0)
+
+    _c.setFillColorRGB(0, 0, 0)
+    _c.setFont(_font_name, _font_size)
+    _text_y = _page_h - _top - _font_size + 1
+    _c.drawString(_text_x, _text_y, _line_text)
 
     _seal_image_bytes = data.get("seal_image_bytes")
     if _seal_image_bytes:
         try:
-            with PILImage.open(BytesIO(_seal_image_bytes)) as _seal:
-                _seal = _seal.convert("RGBA")
-                _seal.thumbnail((120, 120))
-                _img.paste(_seal, (_sign_x + 210, _y - 35), _seal)
+            from reportlab.lib.utils import ImageReader
+            _seal_reader = ImageReader(BytesIO(_seal_image_bytes))
+            _seal_w = 46
+            _seal_h = 46
+            _seal_x = min(_text_x + _text_w - 18, _page_w - _seal_w - 24)
+            _seal_y = _y_bottom - 10
+            _c.drawImage(_seal_reader, _seal_x, _seal_y, width=_seal_w, height=_seal_h, mask='auto')
         except Exception:
             pass
 
-    _footer = "※ 본 문서는 시스템에서 자동 생성된 PDF 초안입니다. 필요 시 최종 문구를 검토 후 사용하세요."
-    _draw.text((_margin_x, _page_h - 90), _footer, font=_font_small, fill="gray")
+    _c.save()
+    _overlay_buf.seek(0)
 
-    _buf = BytesIO()
-    _img.save(_buf, format="PDF", resolution=150.0)
-    _buf.seek(0)
-    return _buf.getvalue(), _file_name
+    _overlay_pdf = PdfReader(_overlay_buf)
+    _page.merge_page(_overlay_pdf.pages[0])
+
+    _out_buf = BytesIO()
+    _writer = PdfWriter()
+    _writer.add_page(_page)
+    _writer.write(_out_buf)
+    _out_buf.seek(0)
+    return _out_buf.getvalue(), _file_name
 
 
 def build_small_work_doc_xlsx(data: dict) -> tuple[bytes, str]:

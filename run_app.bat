@@ -69,24 +69,22 @@ if not exist "%PYTHON_EXE%" (
 
     )
 
-
-
-    echo [4/5] Installing required packages. Please wait...
-
-    "%PYTHON_EXE%" -m pip install --upgrade pip
-
-    if errorlevel 1 goto :pip_fail
-
-    "%PYTHON_EXE%" -m pip install -r requirements.txt chromadb pillow pyyaml
-
-    if errorlevel 1 goto :pip_fail
-
 ) else (
 
     echo [3/5] Using existing Windows venv: %VENV_DIR%
 
 )
 
+
+echo [4/5] Checking required packages. Please wait...
+
+"%PYTHON_EXE%" -m pip install --upgrade pip
+
+if errorlevel 1 goto :pip_fail
+
+"%PYTHON_EXE%" -m pip install -r requirements.txt chromadb pillow pyyaml
+
+if errorlevel 1 goto :pip_fail
 
 
 echo [5/5] Starting Streamlit app...
