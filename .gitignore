@@ -6,3 +6,18 @@ __pycache__/
 .env
 .DS_Store
 Thumbs.db
+
+# Local virtual environments
+.venv/
+.venv-win/
+
+# Local backup / scratch folders
+_backups/
+*_backup_*.py
+
+# OS/editor/runtime noise
+*.tmp
+*.bak
+
+# Chroma / Streamlit local caches outside tracked DB assets
+.cache/
