@@ -1995,6 +1995,52 @@ with _main_col:
                 )
                 _sw_company = st.text_input("업체명 입력", placeholder="예: 유진건설", key="sw_company", label_visibility="collapsed")
                 _sw_ceo = st.text_input("대표자", placeholder="예: 도현수", key="sw_ceo")
+                st.markdown(
+                    """
+                    <style>
+                    div[data-testid='stCheckbox'] label p {
+                        font-size: 0.78rem;
+                        color: #70757a;
+                    }
+                    div[data-testid='stCheckbox'] {
+                        margin-top: 0.38rem;
+                    }
+                    .smallwork-field-label {
+                        font-size: 0.95rem;
+                        font-weight: 600;
+                        color: rgb(38, 39, 48);
+                        margin-bottom: 0.18rem;
+                    }
+                    .smallwork-checkbox-wrap {
+                        display: flex;
+                        justify-content: flex-end;
+                        align-items: center;
+                        min-height: 1.8rem;
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                _contact_label_col, _contact_check_col = st.columns([4.8, 1.2], vertical_alignment="center")
+                with _contact_label_col:
+                    st.markdown("<div class='smallwork-field-label'>업체 업무담당자</div>", unsafe_allow_html=True)
+                with _contact_check_col:
+                    st.markdown("<div class='smallwork-checkbox-wrap'>", unsafe_allow_html=True)
+                    _sw_contact_same = st.checkbox("대표자와 같음", key="sw_contact_same", label_visibility="visible")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                if st.session_state.get("sw_contact_same"):
+                    st.session_state["sw_contact_person"] = st.session_state.get("sw_ceo", "")
+                _sw_contact_person = st.text_input(
+                    "업체 업무담당자",
+                    placeholder="예: 김도현",
+                    key="sw_contact_person",
+                    disabled=st.session_state.get("sw_contact_same", False),
+                    label_visibility="collapsed",
+                )
+                st.markdown("<div class='smallwork-field-label'>연락처</div>", unsafe_allow_html=True)
+                _sw_contact_phone = st.text_input("연락처", placeholder="예: 010-1234-5678", key="sw_contact_phone", label_visibility="collapsed")
+                st.markdown("<div class='smallwork-field-label'>이메일 주소</div>", unsafe_allow_html=True)
+                _sw_contact_email = st.text_input("이메일 주소", placeholder="예: sample@company.co.kr", key="sw_contact_email", label_visibility="collapsed")
                 _sw_address = st.text_area("주소", placeholder="예: 서울시 성북구 화랑로 1026-0708번지", height=100, key="sw_address")
                 _sw_seal_file = st.file_uploader("직인 이미지 업로드", type=["png", "jpg", "jpeg", "webp"], key="sw_seal_file")
             with _swc2:
@@ -2020,6 +2066,9 @@ with _main_col:
 - 공사기간: {_sw_start_date.strftime('%Y-%m-%d')} ~ {_sw_end_date.strftime('%Y-%m-%d')}
 - 계약업체명: {_sw_company or '-'}
 - 대표자: {_sw_ceo or '-'}
+- 업체 업무담당자: {_sw_contact_person or '-'}
+- 연락처: {_sw_contact_phone or '-'}
+- 이메일 주소: {_sw_contact_email or '-'}
 - 주소: {_sw_address or '-'}
 - 통제금액/기초금액: {_sw_base_amount:,}원
 - 계약금액: {_sw_contract_amount:,}원
@@ -2071,6 +2120,9 @@ with _main_col:
                             "contract_method": _sw_contract_method.strip() or "수의계약",
                             "company_name": _sw_company.strip(),
                             "ceo_name": _sw_ceo.strip(),
+                            "contact_person": (_sw_contact_person or "").strip(),
+                            "contact_phone": (_sw_contact_phone or "").strip(),
+                            "contact_email": (_sw_contact_email or "").strip(),
                             "address": _sw_address.strip(),
                             "defect_label": _sw_defect_label,
                             "defect_rate": {
