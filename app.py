@@ -2021,13 +2021,15 @@ with _main_col:
                     """,
                     unsafe_allow_html=True,
                 )
-                _contact_label_col, _contact_check_col = st.columns([4.8, 1.2], vertical_alignment="center")
+                _contact_label_col, _contact_check_col, _contact_spacer_col = st.columns([2.3, 1.6, 2.1], vertical_alignment="center")
                 with _contact_label_col:
                     st.markdown("<div class='smallwork-field-label'>업체 업무담당자</div>", unsafe_allow_html=True)
                 with _contact_check_col:
-                    st.markdown("<div class='smallwork-checkbox-wrap'>", unsafe_allow_html=True)
+                    st.markdown("<div class='smallwork-checkbox-wrap' style='justify-content:flex-start;'>", unsafe_allow_html=True)
                     _sw_contact_same = st.checkbox("대표자와 같음", key="sw_contact_same", label_visibility="visible")
                     st.markdown("</div>", unsafe_allow_html=True)
+                with _contact_spacer_col:
+                    st.markdown("&nbsp;", unsafe_allow_html=True)
                 if st.session_state.get("sw_contact_same"):
                     st.session_state["sw_contact_person"] = st.session_state.get("sw_ceo", "")
                 _sw_contact_person = st.text_input(
