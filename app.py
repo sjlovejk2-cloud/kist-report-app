@@ -883,6 +883,103 @@ def build_small_work_doc_xlsx(data: dict) -> tuple[bytes, str]:
     return _buf.getvalue(), _file_name
 
 
+SMALL_WORK_PDF_ORDER_1 = [
+    ("승락서", ["승락서", "acceptance"]),
+    ("지급각서", ["지급각서", "지급", "payment"]),
+    ("하자보수책임각서", ["하자보수책임각서", "하자각서", "하자보수", "하자", "defect"]),
+    ("청렴계약 이행각서", ["청렴계약 이행각서", "청렴계약이행각서", "청렴", "integrity"]),
+    ("견적서(내역서)", ["견적서", "내역서", "산출내역", "견적", "quotation", "estimate"]),
+]
+
+SMALL_WORK_PDF_ORDER_2 = [
+    ("도면", ["도면", "drawing", "dwg"]),
+    ("시방서", ["시방서", "spec", "specification"]),
+]
+
+
+def _extract_pdf_preview_text(pdf_bytes: bytes, max_pages: int = 2) -> str:
+    try:
+        from pypdf import PdfReader
+        _reader = PdfReader(BytesIO(pdf_bytes))
+        _parts = []
+        for _page in _reader.pages[:max_pages]:
+            try:
+                _parts.append(_page.extract_text() or "")
+            except Exception:
+                pass
+        return "\n".join(_parts)
+    except Exception:
+        return ""
+
+
+def _pdf_order_score(file_name: str, pdf_bytes: bytes, order_spec: list[tuple[str, list[str]]]) -> tuple[int, str]:
+    # 파일명 판정을 먼저 적용합니다.
+    # 예: 시방서.pdf 안의 본문에 '도면'이라는 단어가 있어도 파일명이 시방서면 시방서로 분류해야 합니다.
+    _name_haystack = os.path.splitext(os.path.basename(file_name or ""))[0].lower().replace(" ", "")
+    for _idx, (_label, _keywords) in enumerate(order_spec):
+        for _kw in _keywords:
+            if _kw.lower().replace(" ", "") in _name_haystack:
+                return _idx, _label
+
+    # 파일명으로 구분되지 않을 때만 PDF 본문 앞부분을 보조 판정에 사용합니다.
+    _text_haystack = _extract_pdf_preview_text(pdf_bytes).lower().replace(" ", "")
+    for _idx, (_label, _keywords) in enumerate(order_spec):
+        for _kw in _keywords:
+            if _kw.lower().replace(" ", "") in _text_haystack:
+                return _idx, _label
+    return 999, "미분류"
+
+
+def sort_small_work_pdfs(uploaded_files, order_spec: list[tuple[str, list[str]]]):
+    _items = []
+    for _upload_idx, _file in enumerate(uploaded_files or []):
+        _bytes = _file.getvalue()
+        _score, _label = _pdf_order_score(_file.name, _bytes, order_spec)
+        _items.append({
+            "upload_idx": _upload_idx,
+            "name": _file.name,
+            "bytes": _bytes,
+            "score": _score,
+            "label": _label,
+        })
+    _items.sort(key=lambda x: (x["score"], x["upload_idx"]))
+    return _items
+
+
+def merge_pdf_items(pdf_items: list[dict]) -> bytes:
+    from pypdf import PdfReader, PdfWriter
+
+    _writer = PdfWriter()
+    for _item in pdf_items:
+        _reader = PdfReader(BytesIO(_item["bytes"]))
+        for _page in _reader.pages:
+            _writer.add_page(_page)
+    _buf = BytesIO()
+    _writer.write(_buf)
+    _buf.seek(0)
+    return _buf.getvalue()
+
+
+def _safe_pdf_merge_name(prefix: str, project_name: str) -> str:
+    _safe = re.sub(r'[\\/:*?"<>|]+', '_', project_name or "소액공사")[:80]
+    return f"{prefix}_{_safe}_{datetime.today().strftime('%Y%m%d')}.pdf"
+
+
+def _fmt_short_contract_date(_dt) -> str:
+    return f"{_dt.year % 100}/ {_dt.month}/ {_dt.day}"
+
+
+def build_contract_request_text(data: dict) -> str:
+    return "\n".join([
+        f"1. 계약업체: {data.get('company_name') or '-'}",
+        f"2. 통제금액: {int(data.get('base_amount') or 0):,}원",
+        f"3. 계약금액: {int(data.get('contract_amount') or 0):,}원",
+        f"4. 계약일자: {_fmt_short_contract_date(data['contract_date'])}",
+        f"5. 착공일자: {_fmt_short_contract_date(data['start_date'])}",
+        f"6. 준공일자: {_fmt_short_contract_date(data['end_date'])}",
+    ])
+
+
 def analyze_design_document(file_name: str, text: str, sheet_names: list[str]):
     normalized = _normalize_text(text)
     haystack = f"{file_name} {' '.join(sheet_names)} {normalized}".lower()
@@ -2121,53 +2218,266 @@ with _main_col:
                 _missing.append("업체명")
             if not _sw_ceo.strip():
                 _missing.append("대표자")
+            if not (_sw_contact_person or "").strip():
+                _missing.append("업체 업무담당자")
+            if not (_sw_contact_phone or "").strip():
+                _missing.append("연락처")
+            if not (_sw_contact_email or "").strip():
+                _missing.append("이메일 주소")
             if not _sw_address.strip():
                 _missing.append("주소")
+            if _sw_base_amount <= 0:
+                _missing.append("통제금액/기초금액")
             if _sw_contract_amount <= 0:
                 _missing.append("계약금액")
             if _sw_end_date < _sw_start_date:
                 st.error("공사 종료일은 시작일보다 빠를 수 없습니다.")
                 _missing.append("공사기간")
 
+            _small_work_data = {
+                "contract_date": _sw_contract_date,
+                "start_date": _sw_start_date,
+                "end_date": _sw_end_date,
+                "project_name": _sw_project_name.strip(),
+                "base_amount": _sw_base_amount,
+                "contract_amount": _sw_contract_amount,
+                "contract_method": _sw_contract_method.strip() or "수의계약",
+                "company_name": _sw_company.strip(),
+                "ceo_name": _sw_ceo.strip(),
+                "contact_person": (_sw_contact_person or "").strip(),
+                "contact_phone": (_sw_contact_phone or "").strip(),
+                "contact_email": (_sw_contact_email or "").strip(),
+                "address": _sw_address.strip(),
+                "defect_label": _sw_defect_label,
+                "defect_rate": {
+                    "건설업종 3%": 0.03,
+                    "조경 5%": 0.05,
+                    "전기, 통신, 소방 등 건설업종 외의 공사 2%": 0.02,
+                }[_sw_defect_label],
+                "defect_period": _sw_defect_period.strip() or "2년",
+                "seal_image_bytes": _sw_seal_file.getvalue() if _sw_seal_file else None,
+            }
+
             if _missing:
                 st.caption("입력 필요: " + ", ".join(_missing))
 
+            if "sw_docs_generated" not in st.session_state:
+                st.session_state["sw_docs_generated"] = False
+            if "sw_pdf_merge_open" not in st.session_state:
+                st.session_state["sw_pdf_merge_open"] = False
+            if "sw_contract_request_open" not in st.session_state:
+                st.session_state["sw_contract_request_open"] = False
+
+            def _toggle_sw_pdf_merge():
+                _next = not st.session_state.get("sw_pdf_merge_open", False)
+                st.session_state["sw_pdf_merge_open"] = _next
+                if _next:
+                    st.session_state["sw_contract_request_open"] = False
+
+            def _toggle_sw_contract_request():
+                _next = not st.session_state.get("sw_contract_request_open", False)
+                st.session_state["sw_contract_request_open"] = _next
+                if _next:
+                    st.session_state["sw_pdf_merge_open"] = False
+
+            _sw_pdf_active = bool(st.session_state.get("sw_pdf_merge_open", False))
+            _sw_copy_active = bool(st.session_state.get("sw_contract_request_open", False))
+            _sw_current_token = hashlib.sha256(repr({
+                "contract_date": _sw_contract_date.isoformat(),
+                "start_date": _sw_start_date.isoformat(),
+                "end_date": _sw_end_date.isoformat(),
+                "project_name": _sw_project_name.strip(),
+                "base_amount": _sw_base_amount,
+                "contract_amount": _sw_contract_amount,
+                "company_name": _sw_company.strip(),
+                "ceo_name": _sw_ceo.strip(),
+                "address": _sw_address.strip(),
+                "defect_label": _sw_defect_label,
+                "defect_period": _sw_defect_period.strip(),
+                "has_seal": bool(_sw_seal_file),
+            }).encode("utf-8")).hexdigest()
+            _sw_docs_done = st.session_state.get("sw_docs_generated_token") == _sw_current_token
+
+            def _step_badge(title: str, status: str, active: bool, done: bool) -> str:
+                if done:
+                    _bg, _bd, _fg = "#ecfdf5", "#10b981", "#047857"
+                    _mark = "✅"
+                elif active:
+                    _bg, _bd, _fg = "#eff6ff", "#3b82f6", "#1d4ed8"
+                    _mark = "▶"
+                else:
+                    _bg, _bd, _fg = "#f8fafc", "#e5e7eb", "#64748b"
+                    _mark = "○"
+                return f"""
+<div style='border:1.5px solid {_bd};background:{_bg};border-radius:12px;padding:10px 12px;margin-top:4px;margin-bottom:8px;'>
+  <div style='font-weight:800;color:{_fg};font-size:0.92rem;'>{_mark} {title}</div>
+  <div style='color:{_fg};font-size:0.78rem;margin-top:2px;'>{status}</div>
+</div>
+"""
+
+            _status1, _status2, _status3 = st.columns(3)
+            with _status1:
+                st.markdown(_step_badge("1. 계약서류 생성", "생성 완료" if _sw_docs_done else "아직 생성 전", False, _sw_docs_done), unsafe_allow_html=True)
+            with _status2:
+                st.markdown(_step_badge("2. PDF 병합", "병합창 열림" if _sw_pdf_active else "대기", _sw_pdf_active, False), unsafe_allow_html=True)
+            with _status3:
+                st.markdown(_step_badge("3. 계약요청 문구", "문구창 열림" if _sw_copy_active else "대기", _sw_copy_active, False), unsafe_allow_html=True)
+
             _btn1, _btn2, _btn3 = st.columns(3)
             with _btn1:
-                _sw_generate_clicked = st.button("📄 서류 생성", type="primary", use_container_width=True, key="sw_generate_btn")
+                _sw_generate_clicked = st.button("📄 1. 계약서류 생성", use_container_width=True, key="sw_generate_btn")
             with _btn2:
-                st.button("PDF 자동 포함", use_container_width=True, disabled=True, key="sw_pdf_btn")
+                st.button("📎 2. PDF 병합", use_container_width=True, key="sw_pdf_btn", on_click=_toggle_sw_pdf_merge)
             with _btn3:
-                st.button("계약요청 문구 복사", use_container_width=True, disabled=True, key="sw_copy_btn")
+                st.button("📋 3. 계약요청 문구 복사", use_container_width=True, key="sw_copy_btn", on_click=_toggle_sw_contract_request)
+
+            if st.session_state.get("sw_contract_request_open", False):
+                _request_text = build_contract_request_text(_small_work_data)
+                st.markdown("**계약요청 문구**")
+                st.caption("아래 내용을 그대로 복사해서 계약요청 메모/메신저에 붙여넣으시면 됩니다.")
+                st.text_area("계약요청 문구", value=_request_text, height=180, label_visibility="collapsed", key="sw_contract_request_text")
+                components.html(
+                    f"""
+                    <button id="copy-contract-request" style="width:100%;height:38px;border:1px solid #ddd;border-radius:8px;background:#fff;cursor:pointer;font-size:14px;">
+                      📋 클립보드에 복사
+                    </button>
+                    <script>
+                    const text = {repr(_request_text)};
+                    const btn = document.getElementById('copy-contract-request');
+                    btn.onclick = async () => {{
+                      try {{
+                        await navigator.clipboard.writeText(text);
+                        btn.innerText = '✅ 복사 완료';
+                      }} catch (e) {{
+                        btn.innerText = '복사 실패 - 위 문구를 직접 선택해서 복사하세요';
+                      }}
+                    }};
+                    </script>
+                    """,
+                    height=48,
+                )
+
+            if st.session_state.get("sw_pdf_merge_open", False):
+                st.markdown("---")
+                st.subheader("PDF 자동 병합")
+                st.caption("PDF 파일명을 읽어 자동 정렬합니다. 이름으로 구분이 안 되는 파일은 업로드한 순서대로 뒤에 배치됩니다.")
+
+                _pdf_col1, _pdf_col2 = st.columns(2)
+                with _pdf_col1:
+                    st.markdown("**1번 문서**")
+                    st.caption("순서: 승락서 → 지급각서 → 하자보수책임각서 → 청렴계약 이행각서 → 견적서(내역서)")
+                    _sw_pdf_group1 = st.file_uploader(
+                        "1번 문서에 넣을 PDF 업로드",
+                        type=["pdf"],
+                        accept_multiple_files=True,
+                        key="sw_pdf_group1",
+                    )
+                with _pdf_col2:
+                    st.markdown("**2번 문서**")
+                    st.caption("순서: 도면 → 시방서")
+                    _sw_pdf_group2 = st.file_uploader(
+                        "2번 문서에 넣을 PDF 업로드",
+                        type=["pdf"],
+                        accept_multiple_files=True,
+                        key="sw_pdf_group2",
+                    )
+
+                _merge_col1, _merge_col2 = st.columns(2)
+                with _merge_col1:
+                    _items1 = sort_small_work_pdfs(_sw_pdf_group1, SMALL_WORK_PDF_ORDER_1)
+                    if _items1:
+                        st.markdown("**1번 문서 병합 예정 순서**")
+                        for _i, _item in enumerate(_items1, 1):
+                            st.caption(f"{_i}. [{_item['label']}] {_item['name']}")
+                        try:
+                            _merged1 = merge_pdf_items(_items1)
+                            st.download_button(
+                                "⬇️ 1번 문서 병합 PDF 다운로드",
+                                data=_merged1,
+                                file_name=_safe_pdf_merge_name("1번문서_계약서류", _sw_project_name),
+                                mime="application/pdf",
+                                use_container_width=True,
+                                key="sw_pdf_group1_download",
+                            )
+                        except Exception as _e:
+                            st.error(f"1번 문서 PDF 병합 오류: {_e}")
+                with _merge_col2:
+                    _items2 = sort_small_work_pdfs(_sw_pdf_group2, SMALL_WORK_PDF_ORDER_2)
+                    if _items2:
+                        st.markdown("**2번 문서 병합 예정 순서**")
+                        for _i, _item in enumerate(_items2, 1):
+                            st.caption(f"{_i}. [{_item['label']}] {_item['name']}")
+                        try:
+                            _merged2 = merge_pdf_items(_items2)
+                            st.download_button(
+                                "⬇️ 2번 문서 병합 PDF 다운로드",
+                                data=_merged2,
+                                file_name=_safe_pdf_merge_name("2번문서_도면시방서", _sw_project_name),
+                                mime="application/pdf",
+                                use_container_width=True,
+                                key="sw_pdf_group2_download",
+                            )
+                        except Exception as _e:
+                            st.error(f"2번 문서 PDF 병합 오류: {_e}")
 
             if _sw_generate_clicked:
                 if _missing:
-                    st.error("필수 입력값을 먼저 확인하세요: " + ", ".join(_missing))
+                    _missing_msg = "필수 입력값을 먼저 확인하세요: " + ", ".join(_missing)
+                    _safe_missing_msg = (
+                        _missing_msg.replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                    )
+                    st.markdown(
+                        f"""
+<style>
+@keyframes swCenterToastIn {{
+  0% {{ opacity: 0; transform: translate(-50%, -58%) scale(0.96); }}
+  100% {{ opacity: 1; transform: translate(-50%, -50%) scale(1); }}
+}}
+.sw-center-toast {{
+  position: fixed;
+  left: 50%;
+  top: 46%;
+  transform: translate(-50%, -50%);
+  z-index: 999999;
+  min-width: 360px;
+  max-width: min(620px, 86vw);
+  padding: 18px 22px;
+  border-radius: 16px;
+  background: rgba(30, 41, 59, 0.96);
+  color: white;
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.35);
+  backdrop-filter: blur(8px);
+  font-size: 1.02rem;
+  font-weight: 800;
+  line-height: 1.45;
+  text-align: center;
+  pointer-events: auto;
+  animation: swCenterToastIn 0.18s ease-out forwards;
+}}
+.sw-center-toast .icon {{
+  display: block;
+  font-size: 1.6rem;
+  margin-bottom: 6px;
+}}
+.sw-center-toast .hint {{
+  margin-top: 8px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: rgba(255,255,255,0.78);
+}}
+</style>
+<div class="sw-center-toast">
+  <span class="icon">⚠️</span>
+  {_safe_missing_msg}
+  <div class="hint">누락 항목을 입력하면 이 안내는 자동으로 사라집니다.</div>
+</div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
                 else:
                     try:
-                        _small_work_data = {
-                            "contract_date": _sw_contract_date,
-                            "start_date": _sw_start_date,
-                            "end_date": _sw_end_date,
-                            "project_name": _sw_project_name.strip(),
-                            "base_amount": _sw_base_amount,
-                            "contract_amount": _sw_contract_amount,
-                            "contract_method": _sw_contract_method.strip() or "수의계약",
-                            "company_name": _sw_company.strip(),
-                            "ceo_name": _sw_ceo.strip(),
-                            "contact_person": (_sw_contact_person or "").strip(),
-                            "contact_phone": (_sw_contact_phone or "").strip(),
-                            "contact_email": (_sw_contact_email or "").strip(),
-                            "address": _sw_address.strip(),
-                            "defect_label": _sw_defect_label,
-                            "defect_rate": {
-                                "건설업종 3%": 0.03,
-                                "조경 5%": 0.05,
-                                "전기, 통신, 소방 등 건설업종 외의 공사 2%": 0.02,
-                            }[_sw_defect_label],
-                            "defect_period": _sw_defect_period.strip() or "2년",
-                            "seal_image_bytes": _sw_seal_file.getvalue() if _sw_seal_file else None,
-                        }
                         _xlsx_bytes, _xlsx_name = build_small_work_doc_xlsx(_small_work_data)
                         _pdf_bytes, _pdf_name = build_integrity_pledge_pdf(_small_work_data)
 
@@ -2177,32 +2487,37 @@ with _main_col:
                             _zip.writestr(_pdf_name, _pdf_bytes)
                         _zip_buf.seek(0)
                         _zip_name = f"소액공사서류_{re.sub(r'[\\/:*?\"<>|]+', '_', _sw_project_name.strip())[:80]}_{_sw_contract_date.strftime('%Y%m%d')}.zip"
+                        st.session_state["sw_docs_generated"] = True
+                        st.session_state["sw_docs_generated_token"] = _sw_current_token
+                        st.session_state["sw_pdf_merge_open"] = False
+                        st.session_state["sw_contract_request_open"] = False
 
                         st.success("양식 파일 생성 완료")
-                        st.download_button(
-                            label="⬇️ 전체 서류 ZIP 다운로드",
-                            data=_zip_buf.getvalue(),
-                            file_name=_zip_name,
-                            mime="application/zip",
-                            use_container_width=True,
-                            key="sw_download_zip_btn",
-                        )
-                        st.download_button(
-                            label="⬇️ Excel만 다운로드",
-                            data=_xlsx_bytes,
-                            file_name=_xlsx_name,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True,
-                            key="sw_download_xlsx_btn",
-                        )
-                        st.download_button(
-                            label="⬇️ 청렴계약 이행각서 PDF만 다운로드",
-                            data=_pdf_bytes,
-                            file_name=_pdf_name,
-                            mime="application/pdf",
-                            use_container_width=True,
-                            key="sw_download_pdf_btn",
-                        )
+                        with st.expander("생성된 계약서류 다운로드", expanded=True):
+                            st.download_button(
+                                label="⬇️ 전체 서류 ZIP 다운로드",
+                                data=_zip_buf.getvalue(),
+                                file_name=_zip_name,
+                                mime="application/zip",
+                                use_container_width=True,
+                                key="sw_download_zip_btn",
+                            )
+                            st.download_button(
+                                label="⬇️ Excel만 다운로드",
+                                data=_xlsx_bytes,
+                                file_name=_xlsx_name,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,
+                                key="sw_download_xlsx_btn",
+                            )
+                            st.download_button(
+                                label="⬇️ 청렴계약 이행각서 PDF만 다운로드",
+                                data=_pdf_bytes,
+                                file_name=_pdf_name,
+                                mime="application/pdf",
+                                use_container_width=True,
+                                key="sw_download_pdf_btn",
+                            )
                     except Exception as _e:
                         st.error(f"서류 생성 오류: {_e}")
 
